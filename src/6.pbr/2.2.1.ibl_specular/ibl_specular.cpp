@@ -2,6 +2,9 @@
 #include <GLFW/glfw3.h>
 #include <stb_image.h>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -122,6 +125,7 @@ int main()
 
     // pbr: setup framebuffer
     // ----------------------
+    const int CUBEMAP_DIMENSIONS = 512;
     unsigned int captureFBO;
     unsigned int captureRBO;
     glGenFramebuffers(1, &captureFBO);
@@ -129,14 +133,32 @@ int main()
 
     glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
     glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 512, 512);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, CUBEMAP_DIMENSIONS, CUBEMAP_DIMENSIONS);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, captureRBO);
 
     // pbr: load the HDR environment map
     // ---------------------------------
     stbi_set_flip_vertically_on_load(true);
     int width, height, nrComponents;
+
+    // TODO: this is work in progress to export cubemap, irradiance map and radiance map
+    const bool EXPORT = false;
+    const bool LUT_FLIP_Y = true;
+
+    const std::string name[6] = { "px", "nx", "py", "ny", "pz", "nz"};
+    const std::string outDir = "X:/Bibliotheken/Downloads/debug_out2/";
+    const std::string cubemapOutDir = outDir + "cubemap/";
+    const std::string irradianceOutDir = outDir + "irradiance/";
+    const std::string radianceOutDir = outDir + "radiance/";
+    const std::string lutOutDir = outDir;
+
     float *data = stbi_loadf(FileSystem::getPath("resources/textures/hdr/newport_loft.hdr").c_str(), &width, &height, &nrComponents, 0);
+    //float* data = stbi_loadf(FileSystem::getPath("resources/textures/hdr/skybox.hdr").c_str(), &width, &height, &nrComponents, 0);
+    //float* data = stbi_loadf(FileSystem::getPath("resources/textures/hdr/belfast_sunset_puresky_1k.hdr").c_str(), &width, &height, &nrComponents, 0);
+    
+    stbi_uc* outputPixels;
+
+
     unsigned int hdrTexture;
     if (data)
     {
@@ -148,6 +170,16 @@ int main()
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+        float max = 0;
+
+        for (int h = 0; h < height; h++) {
+            for (int w = 0; w < width; w++) {
+                float value = *(data + w*h + w);
+                max = max > value ? max : value;
+            }
+        }
+        std::cout << "max value of hdr: " << max << "\n";
 
         stbi_image_free(data);
     }
@@ -163,7 +195,7 @@ int main()
     glBindTexture(GL_TEXTURE_CUBE_MAP, envCubemap);
     for (unsigned int i = 0; i < 6; ++i)
     {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 512, 512, 0, GL_RGB, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, CUBEMAP_DIMENSIONS, CUBEMAP_DIMENSIONS, 0, GL_RGB, GL_FLOAT, nullptr);
     }
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -192,8 +224,36 @@ int main()
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, hdrTexture);
 
-    glViewport(0, 0, 512, 512); // don't forget to configure the viewport to the capture dimensions.
+    glViewport(0, 0, CUBEMAP_DIMENSIONS, CUBEMAP_DIMENSIONS); // don't forget to configure the viewport to the capture dimensions.
     glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+    // write cubemap to files
+    if (EXPORT) {
+        std::cout << "Exporting Cubemap:\n";
+		equirectangularToCubemapShader.setBool("toPng", false);
+		for (unsigned int i = 0; i < 6; ++i)
+		{
+			equirectangularToCubemapShader.setMat4("view", captureViews[i]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, envCubemap, 0);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			renderCube();
+
+			// writing to file
+			const int dimensions = CUBEMAP_DIMENSIONS;
+			const int channels = 3;
+			float* framebufferData = (float*)malloc(dimensions * dimensions * channels * sizeof(float));
+			glReadPixels(0, 0, dimensions, dimensions, GL_RGB, GL_FLOAT, framebufferData);
+            std::string outPath = cubemapOutDir + name[i] + ".hdr";
+            stbi_write_hdr(outPath.c_str(), dimensions, dimensions, channels, framebufferData);
+			std::cout << "  face " << i << " -> " << outPath << "\n";
+			free(framebufferData);
+		}
+        std::cout << "\n";
+    }
+
+    // render hdr to cubemap texture
+    equirectangularToCubemapShader.setBool("toPng", false);
     for (unsigned int i = 0; i < 6; ++i)
     {
         equirectangularToCubemapShader.setMat4("view", captureViews[i]);
@@ -210,6 +270,7 @@ int main()
 
     // pbr: create an irradiance cubemap, and re-scale capture FBO to irradiance scale.
     // --------------------------------------------------------------------------------
+    const int IRRADIANCE_DIMENSIONS = 32;
     unsigned int irradianceMap;
     glGenTextures(1, &irradianceMap);
     glBindTexture(GL_TEXTURE_CUBE_MAP, irradianceMap);
@@ -225,7 +286,7 @@ int main()
 
     glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
     glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 32, 32);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, IRRADIANCE_DIMENSIONS, IRRADIANCE_DIMENSIONS);
 
     // pbr: solve diffuse integral by convolution to create an irradiance (cube)map.
     // -----------------------------------------------------------------------------
@@ -235,8 +296,36 @@ int main()
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_CUBE_MAP, envCubemap);
 
-    glViewport(0, 0, 32, 32); // don't forget to configure the viewport to the capture dimensions.
-    glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+    glViewport(0, 0, IRRADIANCE_DIMENSIONS, IRRADIANCE_DIMENSIONS); // don't forget to configure the viewport to the capture dimensions.
+	glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
+
+	// write to file
+	if (EXPORT) {
+        irradianceShader.setBool("toPng", false);
+        std::cout << "Exporting Irradiance Map:\n";
+		for (unsigned int i = 0; i < 6; ++i)
+		{
+			irradianceShader.setMat4("view", captureViews[i]);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, irradianceMap, 0);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			renderCube();
+
+			// writing to file
+			const int dimensions = IRRADIANCE_DIMENSIONS;
+			const int channels = 3;
+			float* framebufferData = (float*)malloc(dimensions * dimensions * channels * sizeof(float));
+			glReadPixels(0, 0, dimensions, dimensions, GL_RGB, GL_FLOAT, framebufferData);
+			std::string outPath = irradianceOutDir + name[i] + ".hdr";
+            stbi_write_hdr(outPath.c_str(), dimensions, dimensions, channels, framebufferData);
+            std::cout << "  face " << i << " -> " << outPath << "\n";
+			free(framebufferData);
+		}
+        std::cout << "\n";
+	}
+
+    // render to texture
+    irradianceShader.setBool("toPng", false);
     for (unsigned int i = 0; i < 6; ++i)
     {
         irradianceShader.setMat4("view", captureViews[i]);
@@ -249,12 +338,13 @@ int main()
 
     // pbr: create a pre-filter cubemap, and re-scale capture FBO to pre-filter scale.
     // --------------------------------------------------------------------------------
+    const int RADIANCE_DIMENSIONS = 128;
     unsigned int prefilterMap;
     glGenTextures(1, &prefilterMap);
     glBindTexture(GL_TEXTURE_CUBE_MAP, prefilterMap);
     for (unsigned int i = 0; i < 6; ++i)
     {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 128, 128, 0, GL_RGB, GL_FLOAT, nullptr);
+        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, RADIANCE_DIMENSIONS, RADIANCE_DIMENSIONS, 0, GL_RGB, GL_FLOAT, nullptr);
     }
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -269,16 +359,57 @@ int main()
     prefilterShader.use();
     prefilterShader.setInt("environmentMap", 0);
     prefilterShader.setMat4("projection", captureProjection);
+    prefilterShader.setFloat("resolution", CUBEMAP_DIMENSIONS + 0.0f);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_CUBE_MAP, envCubemap);
 
     glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
     unsigned int maxMipLevels = 5;
+
+    // write radiance map to files
+	if (EXPORT) {
+		prefilterShader.setBool("toPng", false);
+        std::cout << "Exporting Radiance Map:\n";
+		for (unsigned int mip = 0; mip < maxMipLevels; ++mip)
+		{
+			// reisze framebuffer according to mip-level size.
+			unsigned int mipWidth = static_cast<unsigned int>(RADIANCE_DIMENSIONS * std::pow(0.5, mip));
+			unsigned int mipHeight = static_cast<unsigned int>(RADIANCE_DIMENSIONS * std::pow(0.5, mip));
+			glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
+			glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipWidth, mipHeight);
+			glViewport(0, 0, mipWidth, mipHeight);
+
+			float roughness = (float)mip / (float)(maxMipLevels - 1);
+			prefilterShader.setFloat("roughness", roughness);
+            std::cout << " miplevel " << mip << "\n";
+			for (unsigned int i = 0; i < 6; ++i)
+			{
+				prefilterShader.setMat4("view", captureViews[i]);
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, prefilterMap, mip);
+
+				glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+				renderCube();
+
+
+				// writing to file
+				const int channels = 3;
+				float* framebufferData = (float*)malloc(mipWidth * mipHeight * channels * sizeof(float));
+				glReadPixels(0, 0, mipWidth, mipHeight, GL_RGB, GL_FLOAT, framebufferData);
+				std::string outPath = radianceOutDir + "mip" + std::to_string(mip) + "/" + name[i] + ".hdr";
+				stbi_write_hdr(outPath.c_str(), mipWidth, mipHeight, channels, framebufferData);
+                std::cout << "  face " << i << " -> " << outPath << "\n";
+				free(framebufferData);
+			}
+		}
+        std::cout << "\n";
+    }
+    // render into textures
+    prefilterShader.setBool("toPng", false);
     for (unsigned int mip = 0; mip < maxMipLevels; ++mip)
     {
         // reisze framebuffer according to mip-level size.
-        unsigned int mipWidth  = static_cast<unsigned int>(128 * std::pow(0.5, mip));
-        unsigned int mipHeight = static_cast<unsigned int>(128 * std::pow(0.5, mip));
+        unsigned int mipWidth  = static_cast<unsigned int>(RADIANCE_DIMENSIONS * std::pow(0.5, mip));
+        unsigned int mipHeight = static_cast<unsigned int>(RADIANCE_DIMENSIONS * std::pow(0.5, mip));
         glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, mipWidth, mipHeight);
         glViewport(0, 0, mipWidth, mipHeight);
@@ -298,12 +429,13 @@ int main()
 
     // pbr: generate a 2D LUT from the BRDF equations used.
     // ----------------------------------------------------
+    const int LUT_DIMENSIONS = 512;
     unsigned int brdfLUTTexture;
     glGenTextures(1, &brdfLUTTexture);
 
     // pre-allocate enough memory for the LUT texture.
     glBindTexture(GL_TEXTURE_2D, brdfLUTTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, 512, 512, 0, GL_RG, GL_FLOAT, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, LUT_DIMENSIONS, LUT_DIMENSIONS, 0, GL_RG, GL_FLOAT, 0);
     // be sure to set wrapping mode to GL_CLAMP_TO_EDGE
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -313,16 +445,32 @@ int main()
     // then re-configure capture framebuffer object and render screen-space quad with BRDF shader.
     glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
     glBindRenderbuffer(GL_RENDERBUFFER, captureRBO);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 512, 512);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, LUT_DIMENSIONS, LUT_DIMENSIONS);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, brdfLUTTexture, 0);
 
-    glViewport(0, 0, 512, 512);
-    brdfShader.use();
+	glViewport(0, 0, LUT_DIMENSIONS, LUT_DIMENSIONS);
+	brdfShader.use();
+	if (EXPORT) {
+		brdfShader.setBool("flipY", LUT_FLIP_Y);
+	} else {
+		brdfShader.setBool("flipY", false);
+	}
+
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     renderQuad();
+    if (EXPORT) {
+        // writing to file
+        const int channels = 3;
+        float* framebufferData = (float*)malloc(LUT_DIMENSIONS * LUT_DIMENSIONS * channels * sizeof(float));
+        glReadPixels(0, 0, LUT_DIMENSIONS, LUT_DIMENSIONS, GL_RGB, GL_FLOAT, framebufferData);
+        std::string outPath = lutOutDir + "/LUT.hdr";
+        stbi_write_hdr(outPath.c_str(), LUT_DIMENSIONS, LUT_DIMENSIONS, channels, framebufferData);
+        std::cout << "Exporting LUT:\n";
+        std::cout << "         -> " << outPath << "\n";
+        free(framebufferData);
+    }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
 
     // initialize static shader uniforms before rendering
     // --------------------------------------------------
@@ -339,7 +487,7 @@ int main()
 
     // render loop
     // -----------
-    while (!glfwWindowShouldClose(window))
+    while (!glfwWindowShouldClose(window) && !EXPORT)
     {
         // per-frame time logic
         // --------------------

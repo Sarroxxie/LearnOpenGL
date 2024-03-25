@@ -4,6 +4,8 @@ in vec3 WorldPos;
 
 uniform samplerCube environmentMap;
 uniform float roughness;
+uniform bool toPng;
+uniform float resolution;
 
 const float PI = 3.14159265359;
 // ----------------------------------------------------------------------------
@@ -89,11 +91,10 @@ void main()
             float HdotV = max(dot(H, V), 0.0);
             float pdf = D * NdotH / (4.0 * HdotV) + 0.0001; 
 
-            float resolution = 512.0; // resolution of source cubemap (per face)
             float saTexel  = 4.0 * PI / (6.0 * resolution * resolution);
             float saSample = 1.0 / (float(SAMPLE_COUNT) * pdf + 0.0001);
 
-            float mipLevel = roughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel); 
+            float mipLevel = roughness == 0.0 ? 0.0 : 0.5 * log2(saSample / saTexel);
             
             prefilteredColor += textureLod(environmentMap, L, mipLevel).rgb * NdotL;
             totalWeight      += NdotL;
@@ -101,6 +102,14 @@ void main()
     }
 
     prefilteredColor = prefilteredColor / totalWeight;
+
+    // only activate for export
+    if(toPng) {
+        // tone mapping
+        prefilteredColor = prefilteredColor / (prefilteredColor + vec3(1.0));
+        // gamma correction
+        prefilteredColor = pow(prefilteredColor, vec3(1.0/2.0));
+    }
 
     FragColor = vec4(prefilteredColor, 1.0);
 }
